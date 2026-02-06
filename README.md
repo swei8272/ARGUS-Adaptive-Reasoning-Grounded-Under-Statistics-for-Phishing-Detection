@@ -3,7 +3,10 @@ We design ARUGUS that uses deterministic statistical and structural signals not 
 
 
 
-Here is the example of the complete Prompts mentioned in ARGUS:
+## Below is the example of the complete Prompts mentioned in ARGUS:
+
+
+
 
 Prompt Example 1: clear  logo，domain does not match the brand
 
