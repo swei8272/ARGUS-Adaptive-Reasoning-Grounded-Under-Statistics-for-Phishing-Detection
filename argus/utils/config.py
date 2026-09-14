@@ -4,17 +4,8 @@
 import torch
 
 
-def _select_device() -> torch.device:
-    """Select the best available PyTorch device for ARGUS.
-
-    Deployment priority is Apple Silicon MPS, then CUDA, then CPU.
-    This keeps the Mac deployment accelerated while preserving portability.
-    """
-    if torch.backends.mps.is_available():
-        return torch.device('mps')
-    if torch.cuda.is_available():
-        return torch.device('cuda')
-    return torch.device('cpu')
+# Compatibility alias; training and inference share the runtime policy.
+from argus.utils.runtime import select_device as _select_device
 
 
 class Config:

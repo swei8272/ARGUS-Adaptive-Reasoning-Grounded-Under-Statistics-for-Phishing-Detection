@@ -6,7 +6,9 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import argparse
+import re
 from pathlib import Path
+from urllib.parse import urlparse
 from datetime import datetime
 from PIL import Image
 import random
@@ -14,6 +16,7 @@ from typing import Optional, Tuple
 
 # Import core modules
 from argus.utils.config import Config
+from argus.utils.runtime import seed_everything
 from argus.core.feature_extractor import PhishingFeatureExtractor
 from argus.core.prior_trigger import PriorTriggerRules
 from argus.core.learnable_trigger import LearnableTrigger
@@ -21,6 +24,7 @@ from argus.core.confidence_estimator import ConfidenceEstimator
 from argus.core.multimodal_fusion import OmniModalFusion
 from argus.training.trainer import ARGUSTrainer
 from argus.training.adversarial_aug import AdversarialAugmentation
+from argus.training.data_validation import collate_samples, count_binary_labels, validate_label_counts
 
 
 class PhishingSampleDataset(Dataset):
@@ -44,7 +48,8 @@ class PhishingSampleDataset(Dataset):
                  val_ratio: float = 0.15,
                  augment: bool = False,
                  max_samples: Optional[int] = None,
-                 seed: int = 42):
+                 seed: int = 42,
+                 default_label: Optional[int] = None):
         """
         Args:
             dataset_root: Path to phish_sample_30k folder
@@ -56,6 +61,7 @@ class PhishingSampleDataset(Dataset):
             augment: Whether to use data augmentation
             max_samples: Maximum samples to load (None = all)
             seed: Random seed for reproducibility
+            default_label: Explicit 0/1 policy for missing labels (default: reject)
         """
         self.dataset_root = Path(dataset_root)
         self.feature_extractor = feature_extractor
@@ -63,6 +69,9 @@ class PhishingSampleDataset(Dataset):
         self.split = split
         self.augment = augment
         self.seed = seed
+        if default_label not in (None, 0, 1):
+            raise ValueError('default_label must be explicitly 0, 1, or None')
+        self.default_label = default_label
 
         if augment:
             self.augmentor = AdversarialAugmentation()
@@ -72,6 +81,12 @@ class PhishingSampleDataset(Dataset):
             train_ratio, val_ratio, max_samples
         )
 
+        metadata = [self._read_metadata(folder) for folder in self.samples]
+        self.labels = [item[1] for item in metadata]
+        self.label_counts = count_binary_labels(self.labels)
+        self.defaulted_label_count = sum(item[2] for item in metadata)
+        print(f"{split}: label_counts={self.label_counts}, explicit_default_labels={self.defaulted_label_count}")
+        validate_label_counts(self.label_counts, split, require_both=split != 'train')
         print(f"✅ Loaded {len(self.samples)} samples for '{split}' split")
 
     def _load_and_split_samples(self,
@@ -138,26 +153,29 @@ class PhishingSampleDataset(Dataset):
         sample_folder = self.samples[idx]
 
         # Load data from folder
-        url, html, image, label = self._load_sample_files(sample_folder)
+        try:
+            url, html, image, label = self._load_sample_files(sample_folder)
+        except Exception as error:
+            return self._failure(sample_folder, 'files', error)
 
         # Extract 100-dimensional features
         try:
             features = self.feature_extractor.extract_features(url, html)
             features = torch.from_numpy(features).float()
+            if features.shape != (100,) or not torch.isfinite(features).all():
+                raise ValueError('Expected finite features with shape (100,)')
         except Exception as e:
-            print(f"Warning: Feature extraction failed for {sample_folder.name}: {e}")
-            # Return zero features if extraction fails
-            features = torch.zeros(100, dtype=torch.float32)
+            return self._failure(sample_folder, 'feature', e)
 
         # Compute prior trigger scores
         try:
             prior_scores = self.prior_trigger.compute_trigger_scores(
                 features.unsqueeze(0)
             ).squeeze(0)
+            if prior_scores.shape != (len(self.prior_trigger.task_names),) or not torch.isfinite(prior_scores).all():
+                raise ValueError('Expected finite prior scores with one entry per task')
         except Exception as e:
-            print(f"Warning: Prior trigger failed for {sample_folder.name}: {e}")
-            # Return zero scores if computation fails
-            prior_scores = torch.zeros(len(self.prior_trigger.task_names), dtype=torch.float32)
+            return self._failure(sample_folder, 'prior', e)
 
         # Build return dictionary
         item = {
@@ -179,51 +197,47 @@ class PhishingSampleDataset(Dataset):
 
         return item
 
-    def _load_sample_files(self, folder: Path) -> Tuple[str, Optional[str], Optional[Image.Image], int]:
-        """
-        Load all files from a sample folder
+    @staticmethod
+    def _failure(folder, stage, error):
+        return {'folder_name': folder.name, 'error_stage': stage,
+                'error': f'{type(error).__name__}: {error}'}
 
-        Returns:
-            url: str (URL of the sample)
-            html: str or None (HTML content)
-            image: PIL.Image or None (Screenshot)
-            label: int (1 for phishing, 0 for benign)
-        """
+    def _read_metadata(self, folder):
+        """Accept explicit label fields/standalone tokens, never URL substrings."""
+        info_file = folder / 'info.txt'
+        content = info_file.read_text(encoding='utf-8') if info_file.exists() else ''
         url = None
+        labels = []
+        label_map = {'0': 0, 'benign': 0, 'legitimate': 0, 'legit': 0,
+                     '1': 1, 'phishing': 1, 'phish': 1, 'malicious': 1}
+        for line in content.splitlines():
+            line = line.strip()
+            if line.lower().startswith('url:'):
+                url = line.split(':', 1)[1].strip()
+                continue
+            if line.startswith(('http://', 'https://')):
+                url = line
+                continue
+            match = re.fullmatch(r'(?:label|class)\s*:\s*(.*)', line, re.IGNORECASE)
+            token = match.group(1).strip().lower() if match else line.lower()
+            if match or token in label_map:
+                if token not in label_map:
+                    raise ValueError(f'{folder.name}: unrecognized explicit label {token!r}')
+                labels.append(label_map[token])
+        if len(set(labels)) > 1:
+            raise ValueError(f'{folder.name}: conflicting labels')
+        defaulted = not labels
+        if defaulted and self.default_label is None:
+            raise ValueError(f'{folder.name}: missing explicit label; supply label: 0/1 or an explicit default_label policy')
+        if not url or not url.startswith(('http://', 'https://')) or not urlparse(url).hostname:
+            raise ValueError(f'{folder.name}: missing valid URL; synthetic URLs are not permitted')
+        return url, labels[0] if labels else self.default_label, defaulted
+
+    def _load_sample_files(self, folder: Path) -> Tuple[str, Optional[str], Optional[Image.Image], int]:
+        """Load observed metadata/content; failures are returned by __getitem__."""
+        url, label, _ = self._read_metadata(folder)
         html = None
         image = None
-        label = 1  # Default: phishing (since it's from phish_sample_30k)
-
-        # 1. Load info.txt (contains URL and possibly label)
-        info_file = folder / 'info.txt'
-        if info_file.exists():
-            try:
-                with open(info_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-
-                    # Extract URL
-                    for line in content.split('\n'):
-                        line = line.strip()
-                        if line.startswith('url:') or line.startswith('URL:'):
-                            url = line.split(':', 1)[1].strip()
-                            break
-                        elif line.startswith('http://') or line.startswith('https://'):
-                            url = line
-                            break
-
-                    # Try to detect label from content
-                    content_lower = content.lower()
-                    if 'benign' in content_lower or 'legitimate' in content_lower or 'legit' in content_lower:
-                        label = 0
-                    elif 'phish' in content_lower or 'malicious' in content_lower:
-                        label = 1
-
-            except Exception as e:
-                print(f"Warning: Could not read {info_file}: {e}")
-
-        # If URL not found, generate from folder name
-        if url is None or url == '':
-            url = f"http://sample-{folder.name}.com"
 
         # 2. Load html.txt
         html_file = folder / 'html.txt'
@@ -235,8 +249,7 @@ class PhishingSampleDataset(Dataset):
                     if len(html.strip()) < 10:
                         html = None
             except Exception as e:
-                print(f"Warning: Could not read {html_file}: {e}")
-                html = None
+                raise ValueError(f"Could not read {html_file}: {e}") from e
 
         # 3. Load shot.png
         shot_file = folder / 'shot.png'
@@ -271,7 +284,8 @@ def create_dataloaders(config: Config,
         val_ratio=args.val_ratio,
         augment=True,
         max_samples=args.max_samples,
-        seed=args.seed
+        seed=args.seed,
+        default_label=getattr(args, 'default_label', None)
     )
 
     train_loader = DataLoader(
@@ -279,8 +293,9 @@ def create_dataloaders(config: Config,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=False
+        pin_memory=config.device.type == 'cuda',
+        drop_last=False,
+        collate_fn=collate_samples
     )
 
     # Validation dataset
@@ -293,7 +308,8 @@ def create_dataloaders(config: Config,
         val_ratio=args.val_ratio,
         augment=False,
         max_samples=args.max_samples,
-        seed=args.seed
+        seed=args.seed,
+        default_label=getattr(args, 'default_label', None)
     )
 
     val_loader = DataLoader(
@@ -301,8 +317,9 @@ def create_dataloaders(config: Config,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=False
+        pin_memory=config.device.type == 'cuda',
+        drop_last=False,
+        collate_fn=collate_samples
     )
 
     return train_loader, val_loader
@@ -335,8 +352,7 @@ def main(args):
     dataset_path = Path(args.data_dir)
     if not dataset_path.exists():
         print(f"\n❌ Error: Dataset not found at {args.data_dir}")
-        print(f"   Please check the path and try again.")
-        return
+        raise ValueError(f"Dataset not found: {args.data_dir}")
 
     # Initialize components
     print(f"\n🔧 Initializing components...")
@@ -348,10 +364,10 @@ def main(args):
         feature_dim=config.num_features,
         num_tasks=config.num_tasks,
         prior_weight_init=config.prior_weight_init
-    ).to(config.device)
+    ).to(device=config.device, dtype=torch.float32)
 
-    confidence_estimator = ConfidenceEstimator().to(config.device)
-    multimodal_fusion = OmniModalFusion().to(config.device)
+    confidence_estimator = ConfidenceEstimator().to(device=config.device, dtype=torch.float32)
+    multimodal_fusion = OmniModalFusion().to(device=config.device, dtype=torch.float32)
 
     print(f"✅ All components initialized")
 
@@ -362,7 +378,7 @@ def main(args):
         )
     except Exception as e:
         print(f"\n❌ Error creating data loaders: {e}")
-        return
+        raise
 
     print(f"\n✅ Data loaded successfully:")
     print(f"   Training samples: {len(train_loader.dataset)}")
@@ -485,6 +501,9 @@ if __name__ == '__main__':
     parser.add_argument('--max-samples', type=int, default=None,
                         help='Maximum number of samples to use (None for all)')
 
+    parser.add_argument('--default-label', type=int, choices=[0, 1], default=None,
+                        help='Explicit label policy for samples without labels; never inferred by default')
+
     # Training hyperparameters
     parser.add_argument('--batch-size', type=int, default=32,
                         help='Batch size for training and validation')
@@ -511,13 +530,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # Set random seeds
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
+    # Host and selected-backend RNGs share one explicit runtime policy.
+    seed_everything(args.seed, Config.device)
 
     # Start training
     main(args)

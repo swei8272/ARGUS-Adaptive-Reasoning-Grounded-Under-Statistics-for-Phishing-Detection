@@ -161,9 +161,19 @@ class ConfidenceEstimator(nn.Module):
         Returns:
             overall_confidence_dict
         """
-        quant_conf = confidences.get('quantitative', torch.tensor(0.8))
-        visual_conf = confidences.get('visual', torch.tensor(0.8))
-        semantic_conf = confidences.get('semantic', torch.tensor(0.8))
+        # Preserve the conservative minimum and existing 0.8 missing defaults.
+        reference = next((value for value in confidences.values()
+                          if isinstance(value, torch.Tensor) and value.is_floating_point()),
+                         self.trustworthiness_weight)
+        if self.trustworthiness_weight.device.type == 'mps':
+            reference = self.trustworthiness_weight.float()
+        elif reference.device.type == 'mps':
+            reference = reference.float()
+        quant_conf, visual_conf, semantic_conf = torch.broadcast_tensors(*[
+            torch.as_tensor(confidences.get(name, 0.8),
+                            device=reference.device, dtype=reference.dtype)
+            for name in ('quantitative', 'visual', 'semantic')
+        ])
 
         # 使用最小值作为整体置信度（保守估计）
         overall_confidence = torch.min(torch.stack([

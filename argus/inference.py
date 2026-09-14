@@ -58,17 +58,17 @@ class ARGUSDetector:
             feature_dim=self.config.num_features,
             num_tasks=self.config.num_tasks,
             prior_weight_init=self.config.prior_weight_init
-        ).to(self.config.device)
+        ).to(device=self.config.device, dtype=torch.float32)
 
         # 置信度估计
-        self.confidence_estimator = ConfidenceEstimator().to(self.config.device)
+        self.confidence_estimator = ConfidenceEstimator().to(device=self.config.device, dtype=torch.float32)
 
         # 冲突检测与消解
         self.conflict_detector = ConflictDetector()
         self.conflict_resolver = ConflictResolver()
 
         # 多模态融合
-        self.multimodal_fusion = OmniModalFusion().to(self.config.device)
+        self.multimodal_fusion = OmniModalFusion().to(device=self.config.device, dtype=torch.float32)
 
         # 提示词生成
         self.prompt_generator = HierarchicalPromptGenerator(
@@ -89,7 +89,7 @@ class ARGUSDetector:
     def extract_features(self, url: str, html: Optional[str] = None) -> torch.Tensor:
         """提取特征"""
         features = self.feature_extractor.extract_features(url, html)
-        return torch.from_numpy(features).float().to(self.config.device)
+        return torch.from_numpy(features).float().to(device=self.config.device, dtype=torch.float32)
 
     def trigger_tasks(self, features: torch.Tensor) -> Dict:
         """触发检查任务"""
@@ -130,8 +130,8 @@ class ARGUSDetector:
             # 这里简化处理
             confidences = {
                 'quantitative': quant_conf_dict['confidence'].squeeze(0),
-                'visual': torch.tensor(0.8).to(self.config.device),  # 占位
-                'semantic': torch.tensor(0.85).to(self.config.device)  # 占位
+                'visual': features.new_tensor(0.8),  # 占位
+                'semantic': features.new_tensor(0.85)  # 占位
             }
 
         return confidences
@@ -146,8 +146,8 @@ class ARGUSDetector:
         # Visual和Semantic（占位）
         risk_scores = {
             'quantitative': quant_risk.unsqueeze(0),
-            'visual': torch.tensor(0.5).to(self.config.device),  # 占位
-            'semantic': torch.tensor(0.6).to(self.config.device)  # 占位
+            'visual': features.new_tensor(0.5),  # 占位
+            'semantic': features.new_tensor(0.6)  # 占位
         }
 
         return risk_scores
@@ -163,8 +163,8 @@ class ARGUSDetector:
         Args:
             url: 目标URL
             html: HTML内容（可选）
-            image: 图像路径（可选）
-            use_llm: 是否调用LLM进行最终判断
+            image: Unused image path; visual evidence is still a placeholder.
+            use_llm: Generate a prompt only; no LLM API is called.
 
         Returns:
             result: 检测结果字典
@@ -248,7 +248,8 @@ class ARGUSDetector:
         # 10. 决策
         risk_level = 'HIGH' if final_score > 0.7 else 'MEDIUM' if final_score > 0.4 else 'LOW'
 
-        uncertainty = 1.0 - fusion_info['overall_confidence'] if 'overall_confidence' in fusion_info else 0.5
+        confidence_summary = self.confidence_estimator.compute_overall_confidence(confidences)
+        uncertainty = confidence_summary['uncertainty'].item()
 
         if risk_level == 'HIGH':
             action = 'BLOCK'
@@ -280,7 +281,7 @@ class ARGUSDetector:
             'uncertainty': uncertainty,
             'triggered_tasks': task_info['triggered_tasks'],
             'num_tasks': len(task_info['triggered_tasks']),
-            'conflicts_detected': list(conflicts.keys()) if any(conflicts.values()) else [],
+            'conflicts_detected': [name for name, detected in conflicts.items() if detected],
             'fusion_info': {
                 'available_modalities': fusion_info.get('available_modalities', []),
                 'missing_modalities': fusion_info.get('missing_modalities', []),
@@ -288,7 +289,10 @@ class ARGUSDetector:
             },
             'inference_time_seconds': elapsed_time,
             'prompt': prompt if use_llm else None,
-            'llm_response': llm_response
+            'llm_response': llm_response,
+            'llm_status': 'prompt_only_stub' if use_llm else 'not_requested',
+            'visual_status': 'placeholder_image_unused',
+            'semantic_status': 'placeholder'
         }
 
         return result
@@ -441,7 +445,7 @@ if __name__ == '__main__':
 
     # 推理参数
     parser.add_argument('--use-llm', action='store_true',
-                        help='Use LLM for final analysis')
+                        help='Generate a prompt only (LLM API is not implemented)')
     parser.add_argument('--llm-model', type=str, default='gpt-4-vision-preview',
                         help='LLM model name')
 
