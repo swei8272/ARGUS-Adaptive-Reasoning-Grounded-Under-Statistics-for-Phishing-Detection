@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 import numpy as np
 from datetime import datetime
+from argus.training.data_validation import count_binary_labels, validate_label_counts
 
 
 class ARGUSTrainer:
@@ -53,7 +54,8 @@ class ARGUSTrainer:
         )
 
         # 损失函数
-        self.detection_criterion = nn.BCEWithLogitsLoss()
+        # Fusion returns probabilities throughout training/evaluation/inference.
+        self.detection_criterion = nn.BCELoss()
 
         # 训练历史
         self.history = {
@@ -63,12 +65,12 @@ class ARGUSTrainer:
             'val_f1': []
         }
 
-    def compute_loss(self,
+    def compute_loss_terms(self,
                      features: torch.Tensor,
                      prior_scores: torch.Tensor,
                      labels: torch.Tensor,
                      risk_scores: Optional[Dict[str, torch.Tensor]] = None,
-                     confidences: Optional[Dict[str, torch.Tensor]] = None) -> Tuple[torch.Tensor, Dict]:
+                     confidences: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, torch.Tensor]:
         """
         计算总损失
 
@@ -80,8 +82,9 @@ class ARGUSTrainer:
             confidences: 各模态置信度（可选）
 
         Returns:
-            total_loss: 总损失
-            loss_dict: 损失详情
+            Tensor-valued loss terms and probabilities for backward diagnostics.
+            Detection is structurally independent of trigger tasks; auxiliary
+            terms preserve the existing heuristic and do not add a new coupling.
         """
         batch_size = features.shape[0]
 
@@ -102,16 +105,16 @@ class ARGUSTrainer:
 
             risk_scores = {
                 'quantitative': quant_risk,
-                'visual': torch.ones(batch_size, device=features.device) * 0.5,  # 占位
-                'semantic': torch.ones(batch_size, device=features.device) * 0.5  # 占位
+                'visual': features.new_ones(batch_size) * 0.5,  # 占位
+                'semantic': features.new_ones(batch_size) * 0.5  # 占位
             }
 
         # 4. 如果没有提供confidences
         if confidences is None:
             confidences = {
                 'quantitative': quant_confidence,
-                'visual': torch.ones(batch_size, device=features.device) * 0.8,
-                'semantic': torch.ones(batch_size, device=features.device) * 0.8
+                'visual': features.new_ones(batch_size) * 0.8,
+                'semantic': features.new_ones(batch_size) * 0.8
             }
 
         # 5. 融合
@@ -120,7 +123,7 @@ class ARGUSTrainer:
         # 6. 检测损失（主要损失）
         detection_loss = self.detection_criterion(
             fused_score,
-            labels.float()
+            labels.to(dtype=fused_score.dtype)
         )
 
         # 7. 效率惩罚（惩罚触发过多任务）
@@ -131,8 +134,8 @@ class ARGUSTrainer:
 
         # 8. 相关性奖励（奖励高分任务）
         # 如果预测正确，奖励高触发分数；如果预测错误，惩罚
-        predictions = (torch.sigmoid(fused_score) > 0.5).float()
-        correct = (predictions == labels.float()).float()
+        predictions = (fused_score > 0.5).float()
+        correct = (predictions == labels.to(dtype=fused_score.dtype)).float()
 
         # 正确预测时，奖励高分任务；错误预测时，不奖励
         relevance_reward = (trigger_scores.max(dim=1)[0] * correct).mean()
@@ -144,16 +147,50 @@ class ARGUSTrainer:
                 self.config.relevance_reward_weight * relevance_reward
         )
 
-        # 损失详情
-        loss_dict = {
-            'total_loss': total_loss.item(),
-            'detection_loss': detection_loss.item(),
-            'efficiency_penalty': efficiency_penalty.item(),
-            'relevance_reward': relevance_reward.item(),
-            'avg_tasks_triggered': trigger_scores.sum(dim=1).mean().item()
+        return {
+            'total_loss': total_loss,
+            'detection_loss': detection_loss,
+            'efficiency_penalty': efficiency_penalty,
+            'relevance_reward': relevance_reward,
+            'auxiliary_loss': (self.config.efficiency_penalty_weight * efficiency_penalty
+                               - self.config.relevance_reward_weight * relevance_reward),
+            'avg_tasks_triggered': trigger_scores.sum(dim=1).mean(),
+            'probabilities': fused_score,
         }
 
-        return total_loss, loss_dict
+    def compute_loss(self, features, prior_scores, labels, risk_scores=None, confidences=None):
+        """Compatibility wrapper returning total loss and detached log scalars."""
+        terms = self.compute_loss_terms(features, prior_scores, labels, risk_scores, confidences)
+        return terms['total_loss'], {name: value.item() for name, value in terms.items()
+                                     if name != 'probabilities'}
+
+    def _start_data_report(self, loader, split):
+        self.data_report = {'split': split, 'label_counts': {0: 0, 1: 0},
+                            'attempted_samples': 0,
+                            'failure_counts': {'feature': 0, 'prior': 0, 'files': 0}}
+        dataset = getattr(loader, 'dataset', None)
+        counts = getattr(dataset, 'label_counts', None)
+        if counts is not None:
+            self.data_report['preflight_label_counts'] = dict(counts)
+            print(f'{split}: preflight label_counts={counts}')
+            validate_label_counts(counts, split, require_both=split == 'evaluation')
+
+    def _accept_batch(self, batch):
+        failures = batch.get('failures', [])
+        if 'error_stage' in batch:
+            raise ValueError('Extraction failure: use collate_samples for worker-safe failure counts')
+        labels = batch.get('label', torch.empty(0))
+        counts = count_binary_labels(labels)
+        for label, count in counts.items():
+            self.data_report['label_counts'][label] += count
+        self.data_report['attempted_samples'] += sum(counts.values()) + len(failures)
+        for failure in failures:
+            self.data_report['failure_counts'][failure['error_stage']] += 1
+        if failures:
+            raise ValueError(f"Extraction failures; training/evaluation aborted, no metrics for this epoch/evaluation. "
+                             f"report={self.data_report}; failures={failures}")
+        if not sum(counts.values()):
+            raise ValueError('empty batch; cannot train/evaluate')
 
     def train_epoch(self, train_loader, epoch: int) -> Dict:
         """
@@ -166,6 +203,7 @@ class ARGUSTrainer:
         Returns:
             metrics: 训练指标
         """
+        self._start_data_report(train_loader, 'training')
         self.trigger.train()
         self.confidence.train()
         self.fusion.train()
@@ -177,6 +215,7 @@ class ARGUSTrainer:
         pbar = tqdm(train_loader, desc=f'Epoch {epoch}')
 
         for batch in pbar:
+            self._accept_batch(batch)
             # 提取数据
             features = batch['features'].to(self.config.device)
             prior_scores = batch['prior_scores'].to(self.config.device)
@@ -213,13 +252,16 @@ class ARGUSTrainer:
                 'tasks': f"{loss_dict['avg_tasks_triggered']:.1f}"
             })
 
+        validate_label_counts(self.data_report['label_counts'], 'training')
+
         # 更新学习率
         self.scheduler.step()
 
         metrics = {
             'avg_loss': total_loss / num_batches,
             'avg_detection_loss': total_detection_loss / num_batches,
-            'learning_rate': self.optimizer.param_groups[0]['lr']
+            'learning_rate': self.optimizer.param_groups[0]['lr'],
+            'data_report': self.data_report
         }
 
         self.history['train_loss'].append(metrics['avg_loss'])
@@ -236,6 +278,7 @@ class ARGUSTrainer:
         Returns:
             metrics: 评估指标
         """
+        self._start_data_report(val_loader, 'evaluation')
         self.trigger.eval()
         self.confidence.eval()
         self.fusion.eval()
@@ -248,49 +291,24 @@ class ARGUSTrainer:
 
         with torch.no_grad():
             for batch in tqdm(val_loader, desc='Evaluating'):
+                self._accept_batch(batch)
                 features = batch['features'].to(self.config.device)
                 prior_scores = batch['prior_scores'].to(self.config.device)
                 labels = batch['label'].to(self.config.device)
 
-                # 前向传播
-                loss, loss_dict = self.compute_loss(
-                    features, prior_scores, labels
-                )
-
-                # 获取预测
-                # 重新计算（因为compute_loss内部已经计算过了）
-                trigger_scores, _ = self.trigger.get_top_k_tasks(
-                    features, prior_scores, k=self.config.top_k_tasks
-                )
-
-                conf_dict = self.confidence.compute_quantitative_confidence(features)
-
-                # 简单风险评分
-                rule_features = features[:, 82:92]
-                quant_risk = torch.sigmoid(rule_features.mean(dim=1))
-
-                risk_scores = {
-                    'quantitative': quant_risk,
-                    'visual': torch.ones_like(quant_risk) * 0.5,
-                    'semantic': torch.ones_like(quant_risk) * 0.5
-                }
-
-                confidences = {
-                    'quantitative': conf_dict['confidence'],
-                    'visual': torch.ones_like(quant_risk) * 0.8,
-                    'semantic': torch.ones_like(quant_risk) * 0.8
-                }
-
-                fused_score = self.fusion(risk_scores, confidences)
-                predictions = (torch.sigmoid(fused_score) > 0.5).float()
+                terms = self.compute_loss_terms(features, prior_scores, labels)
+                fused_score = terms['probabilities']
+                predictions = (fused_score > 0.5).float()
 
                 # 收集结果
                 all_predictions.extend(predictions.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
-                all_scores.extend(torch.sigmoid(fused_score).cpu().numpy())
+                all_scores.extend(fused_score.cpu().numpy())
 
-                total_loss += loss_dict['total_loss']
+                total_loss += terms['total_loss'].item()
                 num_batches += 1
+
+        validate_label_counts(self.data_report['label_counts'], 'evaluation', require_both=True)
 
         # 计算指标
         all_predictions = np.array(all_predictions)
@@ -312,7 +330,8 @@ class ARGUSTrainer:
             'accuracy': accuracy,
             'precision': precision,
             'recall': recall,
-            'f1': f1
+            'f1': f1,
+            'data_report': self.data_report
         }
 
         self.history['val_loss'].append(metrics['avg_loss'])

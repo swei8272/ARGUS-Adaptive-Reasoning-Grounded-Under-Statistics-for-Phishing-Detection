@@ -60,19 +60,50 @@ old root scripts. Public component classes are also exported from `argus`.
 
 ### Scientific limitations
 
-No algorithmic or numerical source behavior is changed by this packaging work:
+Issue #2 packaging preserved algorithmic and numerical source behavior:
 feature definitions, thresholds, losses, labels, dataset splits and metrics are
 preserved. Imports and module identities change, so external scripts using old
 paths must migrate; full-object pickles referencing old module paths are not
 compatibility-tested. Existing state-dict keys are unchanged.
 
 Visual/semantic evidence and the LLM integration still contain placeholders;
-without a checkpoint neural components have untrained initialization. Existing
-feature/data failure fallbacks and simplified conflict rules remain in place.
+without a checkpoint neural components have untrained initialization. Simplified conflict rules remain in place; Issue #3 adds explicit dataset and
+extraction failure handling as described below.
 Passing CPU smoke tests does not establish an end-to-end scientifically complete
 ARGUS system, validate training, or reproduce paper metrics. No experiment
 numbers are generated here. The prompt example below is illustrative, not a
 measured model output.
+
+## Training/evaluation correctness (Issue #3)
+
+Fusion scores are probabilities: training uses `BCELoss`, and evaluation applies
+`> 0.5` directly. Fusion weights now receive detection-loss gradients. The
+learnable trigger remains disconnected from detection loss and is trained only
+through the existing auxiliary terms; a strict xfail diagnostic exposes this.
+
+Dataset labels must be explicit (`label: 0` or `label: 1` in `info.txt`), or an
+explicit `--default-label 0/1` policy must be supplied. Label counts are reported;
+empty/single-class evaluation is rejected. Feature/prior failures are counted
+and abort processing instead of entering metrics as zero observations.
+
+Inference uncertainty now uses the confidence estimator's conservative minimum,
+and only true conflicts are reported. `use_llm=True` still only generates a
+prompt, and `image` is unused. Results expose `llm_status`, `visual_status`, and
+`semantic_status` so these placeholders are explicit.
+
+```bash
+python -m pip install -e .
+python -m pip install -e '.[test]'
+python -m pytest -q
+python -m pytest -q tests/test_gradients.py -s
+python -m argus.inference --help
+```
+
+These correctness fixes intentionally change numerical training/evaluation
+behavior; no improved detection performance is claimed. See
+[the correctness contract](docs/correctness.md) for the BEFORE/AFTER table,
+parameter-level gradient paths, failure policy, checkpoint compatibility and
+remaining limitations.
 
 ## Below is the example of the complete Prompts mentioned in ARGUS:
 

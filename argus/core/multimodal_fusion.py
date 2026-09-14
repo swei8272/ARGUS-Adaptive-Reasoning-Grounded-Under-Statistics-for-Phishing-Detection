@@ -55,7 +55,7 @@ class OmniModalFusion(nn.Module):
         p = max(min(p, 1.0 - eps), eps)
         return torch.log(torch.tensor(p * num_classes)).item()
 
-    def get_base_weights(self) -> Dict[str, float]:
+    def get_base_weight_tensors(self) -> Dict[str, torch.Tensor]:
         """
         获取基础权重（未经置信度调整）
 
@@ -65,7 +65,18 @@ class OmniModalFusion(nn.Module):
         logits = torch.stack([self.weight_logits[name] for name in self.modality_names])
         weights = torch.softmax(logits, dim=0)
 
-        return {name: weights[i].item() for i, name in enumerate(self.modality_names)}
+        return {name: weights[i] for i, name in enumerate(self.modality_names)}
+
+    def get_base_weights(self) -> Dict[str, float]:
+        """Detached weights for logging and inference conflict explanations only."""
+        return {name: weight.item() for name, weight in self.get_base_weight_tensors().items()}
+
+    def _reference_tensor(self, risk_scores, confidences):
+        """Use the first floating input's device/dtype, or the module for scalars."""
+        for value in list(risk_scores.values()) + list(confidences.values()):
+            if isinstance(value, torch.Tensor) and value.is_floating_point():
+                return value
+        return next(iter(self.weight_logits.values()))
 
     def _extract_available_modalities(self,
                                      risk_scores: Dict[str, torch.Tensor],
@@ -101,7 +112,7 @@ class OmniModalFusion(nn.Module):
             if has_confidence:
                 conf = confidences[modality]
                 if isinstance(conf, torch.Tensor):
-                    avg_conf = conf.mean().item()
+                    avg_conf = conf.mean()
                 else:
                     avg_conf = float(conf)
 
@@ -115,30 +126,18 @@ class OmniModalFusion(nn.Module):
 
         return available, availability_info
 
-    def _normalize_tensor(self, tensor, default_value: float = 0.5) -> torch.Tensor:
-        """
-        安全地归一化张量
-
-        Args:
-            tensor: 输入张量（可能是None/float/int/tensor）
-            default_value: 如果无法归一化的默认值
-
-        Returns:
-            normalized_tensor: torch.Tensor
-        """
+    def _normalize_tensor(self, tensor, default_value: float = 0.5,
+                          reference: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Normalize without detaching gradients or allocating CPU-only defaults."""
+        if reference is None:
+            reference = next(iter(self.weight_logits.values()))
         if tensor is None:
-            return torch.tensor(default_value)
-
-        if isinstance(tensor, (int, float)):
-            return torch.tensor(float(tensor))
-
-        if not isinstance(tensor, torch.Tensor):
-            try:
-                tensor = torch.tensor(tensor)
-            except:
-                return torch.tensor(default_value)
-
-        return tensor
+            tensor = default_value
+        try:
+            return torch.as_tensor(tensor, device=reference.device, dtype=reference.dtype)
+        except (TypeError, ValueError):
+            warnings.warn("Invalid fusion input; using the existing default score")
+            return reference.new_tensor(default_value)
 
     def _ensure_same_shape(self, tensors: Dict[str, torch.Tensor], batch_size: int) -> Dict[str, torch.Tensor]:
         """
@@ -165,7 +164,7 @@ class OmniModalFusion(nn.Module):
                 result[key] = tensor
             else:
                 # 其他情况：取平均后扩展
-                result[key] = torch.full((batch_size,), tensor.mean().item())
+                result[key] = tensor.mean().expand(batch_size)
 
         return result
 
@@ -185,6 +184,8 @@ class OmniModalFusion(nn.Module):
             fused_score: (batch_size,) 融合后的风险评分
             fusion_info: Dict包含融合详细信息
         """
+        reference = self._reference_tensor(risk_scores, confidences)
+
         # 1. 检测可用模态
         available_modalities, availability_info = self._extract_available_modalities(
             risk_scores, confidences
@@ -201,7 +202,7 @@ class OmniModalFusion(nn.Module):
                     batch_size = scores.shape[0] if scores.ndim > 0 else 1
                     break
 
-            return torch.full((batch_size,), 0.5), {
+            return reference.new_full((batch_size,), 0.5), {
                 'error': 'no_available_modalities',
                 'availability': availability_info,
                 'fallback_score': 0.5
@@ -209,7 +210,7 @@ class OmniModalFusion(nn.Module):
 
         # 3. 获取基础权重
         if adjusted_weights is None:
-            base_weights = self.get_base_weights()
+            base_weights = self.get_base_weight_tensors()
         else:
             base_weights = adjusted_weights.copy()
 
@@ -221,9 +222,10 @@ class OmniModalFusion(nn.Module):
 
         # 第一遍：提取所有数据并推断batch_size
         for modality in available_modalities:
-            score = self._normalize_tensor(risk_scores.get(modality, 0.5))
-            conf = self._normalize_tensor(confidences.get(modality, 1.0))
-            weight = base_weights.get(modality, 1.0 / len(available_modalities))
+            score = self._normalize_tensor(risk_scores.get(modality, 0.5), reference=reference)
+            conf = self._normalize_tensor(confidences.get(modality, 1.0), reference=reference)
+            weight = self._normalize_tensor(
+                base_weights.get(modality, 1.0 / len(available_modalities)), reference=reference)
 
             # 推断batch_size
             if batch_size is None:
@@ -245,8 +247,8 @@ class OmniModalFusion(nn.Module):
         normalized_confs = self._ensure_same_shape(raw_confs, batch_size)
 
         # 5. 置信度加权融合
-        weighted_sum = torch.zeros(batch_size)
-        weight_sum = torch.zeros(batch_size)
+        weighted_sum = reference.new_zeros(batch_size)
+        weight_sum = reference.new_zeros(batch_size)
 
         for modality in available_modalities:
             score = normalized_scores[modality]
@@ -273,7 +275,8 @@ class OmniModalFusion(nn.Module):
             'available_modalities': available_modalities,
             'missing_modalities': availability_info['missing'],
             'low_confidence_modalities': availability_info['low_confidence'],
-            'base_weights': {m: base_weights.get(m, 0.0) for m in self.modality_names},
+            'base_weights': {m: self._normalize_tensor(base_weights.get(m, 0.0), reference=reference).item()
+                             for m in self.modality_names},
             'effective_weights': effective_weights,
             'risk_scores': {m: normalized_scores[m].mean().item() for m in available_modalities},
             'confidences': {m: normalized_confs[m].mean().item() for m in available_modalities},

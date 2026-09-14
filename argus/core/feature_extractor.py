@@ -198,7 +198,7 @@ class PhishingFeatureExtractor:
             features[37] = self._calculate_entropy(query) if query else 0.0
 
         except Exception as e:
-            pass  # 保持默认值0
+            raise ValueError(f"URL feature extraction failed for {url}: {e}") from e
 
         return features
 
@@ -325,8 +325,8 @@ class PhishingFeatureExtractor:
                 if creation and expiration:
                     delta = expiration - creation
                     return float(delta.days)
-        except:
-            pass
+        except Exception as e:
+            raise ValueError(f"WHOIS feature lookup failed for {url}: {e}") from e
 
         return 0.0
 
@@ -348,8 +348,8 @@ class PhishingFeatureExtractor:
                     now = datetime.now()
                     delta = now - creation
                     return float(delta.days)
-        except:
-            pass
+        except Exception as e:
+            raise ValueError(f"WHOIS feature lookup failed for {url}: {e}") from e
 
         return 0.0
 
@@ -421,7 +421,7 @@ class PhishingFeatureExtractor:
             features[18] = self._calculate_external_ratio(url, scripts, 'src')
 
         except Exception as e:
-            pass
+            raise ValueError(f"HTML feature extraction failed for {url}: {e}") from e
 
         return features
 
