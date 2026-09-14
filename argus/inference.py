@@ -58,17 +58,17 @@ class ARGUSDetector:
             feature_dim=self.config.num_features,
             num_tasks=self.config.num_tasks,
             prior_weight_init=self.config.prior_weight_init
-        ).to(self.config.device)
+        ).to(device=self.config.device, dtype=torch.float32)
 
         # 置信度估计
-        self.confidence_estimator = ConfidenceEstimator().to(self.config.device)
+        self.confidence_estimator = ConfidenceEstimator().to(device=self.config.device, dtype=torch.float32)
 
         # 冲突检测与消解
         self.conflict_detector = ConflictDetector()
         self.conflict_resolver = ConflictResolver()
 
         # 多模态融合
-        self.multimodal_fusion = OmniModalFusion().to(self.config.device)
+        self.multimodal_fusion = OmniModalFusion().to(device=self.config.device, dtype=torch.float32)
 
         # 提示词生成
         self.prompt_generator = HierarchicalPromptGenerator(
@@ -89,7 +89,7 @@ class ARGUSDetector:
     def extract_features(self, url: str, html: Optional[str] = None) -> torch.Tensor:
         """提取特征"""
         features = self.feature_extractor.extract_features(url, html)
-        return torch.from_numpy(features).float().to(self.config.device)
+        return torch.from_numpy(features).float().to(device=self.config.device, dtype=torch.float32)
 
     def trigger_tasks(self, features: torch.Tensor) -> Dict:
         """触发检查任务"""
@@ -130,8 +130,8 @@ class ARGUSDetector:
             # 这里简化处理
             confidences = {
                 'quantitative': quant_conf_dict['confidence'].squeeze(0),
-                'visual': torch.tensor(0.8).to(self.config.device),  # 占位
-                'semantic': torch.tensor(0.85).to(self.config.device)  # 占位
+                'visual': features.new_tensor(0.8),  # 占位
+                'semantic': features.new_tensor(0.85)  # 占位
             }
 
         return confidences
@@ -146,8 +146,8 @@ class ARGUSDetector:
         # Visual和Semantic（占位）
         risk_scores = {
             'quantitative': quant_risk.unsqueeze(0),
-            'visual': torch.tensor(0.5).to(self.config.device),  # 占位
-            'semantic': torch.tensor(0.6).to(self.config.device)  # 占位
+            'visual': features.new_tensor(0.5),  # 占位
+            'semantic': features.new_tensor(0.6)  # 占位
         }
 
         return risk_scores

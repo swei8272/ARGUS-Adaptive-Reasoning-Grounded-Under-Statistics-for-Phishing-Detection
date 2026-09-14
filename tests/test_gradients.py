@@ -7,12 +7,13 @@ import torch
 from argus import ConfidenceEstimator, LearnableTrigger, OmniModalFusion
 from argus.training.trainer import ARGUSTrainer
 from argus.utils.config import Config
+from argus.utils.runtime import seed_everything
 
 
-def diagnostic(loss_name):
-    torch.manual_seed(7)
+def diagnostic(loss_name, device='cpu'):
+    seed_everything(7, torch.device(device))
     config = Config()
-    config.device = torch.device('cpu')
+    config.device = torch.device(device)
     trainer = ARGUSTrainer(LearnableTrigger(num_tasks=config.num_tasks),
                            ConfidenceEstimator(), OmniModalFusion(), config)
     features = torch.zeros(2, 100)
@@ -32,12 +33,14 @@ def diagnostic(loss_name):
     return result
 
 
+@pytest.mark.parametrize('device', ['cpu', pytest.param('mps', marks=pytest.mark.skipif(
+    not torch.backends.mps.is_available(), reason='Real MPS hardware unavailable'))])
 @pytest.mark.parametrize('loss_name', [
     'detection_loss', 'efficiency_penalty', 'relevance_reward', 'auxiliary_loss', 'total_loss',
 ])
-def test_gradient_diagnostics(loss_name):
-    result = diagnostic(loss_name)
-    print('\n' + loss_name + ': ' + json.dumps(result, sort_keys=True))
+def test_gradient_diagnostics(loss_name, device):
+    result = diagnostic(loss_name, device)
+    print('\n' + device + ' ' + loss_name + ': ' + json.dumps(result, sort_keys=True))
     expected_prefixes = ({'confidence', 'fusion'} if loss_name == 'detection_loss' else
                          {'trigger', 'confidence', 'fusion'} if loss_name == 'total_loss' else {'trigger'})
     assert {name.split('.')[0] for name in result['finite_nonzero']} == expected_prefixes

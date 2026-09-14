@@ -73,10 +73,13 @@ class OmniModalFusion(nn.Module):
 
     def _reference_tensor(self, risk_scores, confidences):
         """Use the first floating input's device/dtype, or the module for scalars."""
+        parameter = next(iter(self.weight_logits.values()))
+        if parameter.device.type == 'mps':
+            return parameter.float()
         for value in list(risk_scores.values()) + list(confidences.values()):
             if isinstance(value, torch.Tensor) and value.is_floating_point():
-                return value
-        return next(iter(self.weight_logits.values()))
+                return value.float() if value.device.type == 'mps' else value
+        return parameter
 
     def _extract_available_modalities(self,
                                      risk_scores: Dict[str, torch.Tensor],

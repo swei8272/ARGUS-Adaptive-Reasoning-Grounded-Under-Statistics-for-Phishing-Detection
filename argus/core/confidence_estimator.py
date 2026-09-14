@@ -165,6 +165,10 @@ class ConfidenceEstimator(nn.Module):
         reference = next((value for value in confidences.values()
                           if isinstance(value, torch.Tensor) and value.is_floating_point()),
                          self.trustworthiness_weight)
+        if self.trustworthiness_weight.device.type == 'mps':
+            reference = self.trustworthiness_weight.float()
+        elif reference.device.type == 'mps':
+            reference = reference.float()
         quant_conf, visual_conf, semantic_conf = torch.broadcast_tensors(*[
             torch.as_tensor(confidences.get(name, 0.8),
                             device=reference.device, dtype=reference.dtype)

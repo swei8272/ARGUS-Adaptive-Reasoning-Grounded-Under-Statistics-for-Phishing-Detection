@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 import numpy as np
 from datetime import datetime
+from argus.utils.runtime import device_dtype
 from argus.training.data_validation import count_binary_labels, validate_label_counts
 
 
@@ -38,6 +39,10 @@ class ARGUSTrainer:
         self.confidence = confidence_estimator
         self.fusion = multimodal_fusion
         self.config = config
+        self.device = torch.device(config.device)
+        self.dtype = device_dtype(self.device, next(self.trigger.parameters()).dtype)
+        for module in (self.trigger, self.confidence, self.fusion):
+            module.to(device=self.device, dtype=self.dtype)
 
         # 优化器
         self.optimizer = optim.AdamW([
@@ -86,6 +91,16 @@ class ARGUSTrainer:
             Detection is structurally independent of trigger tasks; auxiliary
             terms preserve the existing heuristic and do not add a new coupling.
         """
+        # Convert dtype before MPS dispatch, including direct compute_loss callers.
+        features = features.to(device=self.device, dtype=self.dtype)
+        prior_scores = prior_scores.to(device=self.device, dtype=self.dtype)
+        labels = labels.to(device=self.device, dtype=self.dtype)
+        if risk_scores is not None:
+            risk_scores = {name: torch.as_tensor(value, device=self.device, dtype=self.dtype)
+                           if value is not None else None for name, value in risk_scores.items()}
+        if confidences is not None:
+            confidences = {name: torch.as_tensor(value, device=self.device, dtype=self.dtype)
+                           if value is not None else None for name, value in confidences.items()}
         batch_size = features.shape[0]
 
         # 1. 触发任务
@@ -217,9 +232,9 @@ class ARGUSTrainer:
         for batch in pbar:
             self._accept_batch(batch)
             # 提取数据
-            features = batch['features'].to(self.config.device)
-            prior_scores = batch['prior_scores'].to(self.config.device)
-            labels = batch['label'].to(self.config.device)
+            features = batch['features'].to(device=self.device, dtype=self.dtype)
+            prior_scores = batch['prior_scores'].to(device=self.device, dtype=self.dtype)
+            labels = batch['label'].to(device=self.device, dtype=self.dtype)
 
             # 前向传播
             loss, loss_dict = self.compute_loss(
@@ -292,9 +307,9 @@ class ARGUSTrainer:
         with torch.no_grad():
             for batch in tqdm(val_loader, desc='Evaluating'):
                 self._accept_batch(batch)
-                features = batch['features'].to(self.config.device)
-                prior_scores = batch['prior_scores'].to(self.config.device)
-                labels = batch['label'].to(self.config.device)
+                features = batch['features'].to(device=self.device, dtype=self.dtype)
+                prior_scores = batch['prior_scores'].to(device=self.device, dtype=self.dtype)
+                labels = batch['label'].to(device=self.device, dtype=self.dtype)
 
                 terms = self.compute_loss_terms(features, prior_scores, labels)
                 fused_score = terms['probabilities']

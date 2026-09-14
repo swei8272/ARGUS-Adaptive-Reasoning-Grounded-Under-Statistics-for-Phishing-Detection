@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 
 # Import core modules
 from argus.utils.config import Config
+from argus.utils.runtime import seed_everything
 from argus.core.feature_extractor import PhishingFeatureExtractor
 from argus.core.prior_trigger import PriorTriggerRules
 from argus.core.learnable_trigger import LearnableTrigger
@@ -292,7 +293,7 @@ def create_dataloaders(config: Config,
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=config.device.type == 'cuda',
         drop_last=False,
         collate_fn=collate_samples
     )
@@ -316,7 +317,7 @@ def create_dataloaders(config: Config,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=config.device.type == 'cuda',
         drop_last=False,
         collate_fn=collate_samples
     )
@@ -363,10 +364,10 @@ def main(args):
         feature_dim=config.num_features,
         num_tasks=config.num_tasks,
         prior_weight_init=config.prior_weight_init
-    ).to(config.device)
+    ).to(device=config.device, dtype=torch.float32)
 
-    confidence_estimator = ConfidenceEstimator().to(config.device)
-    multimodal_fusion = OmniModalFusion().to(config.device)
+    confidence_estimator = ConfidenceEstimator().to(device=config.device, dtype=torch.float32)
+    multimodal_fusion = OmniModalFusion().to(device=config.device, dtype=torch.float32)
 
     print(f"✅ All components initialized")
 
@@ -529,13 +530,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # Set random seeds
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
+    # Host and selected-backend RNGs share one explicit runtime policy.
+    seed_everything(args.seed, Config.device)
 
     # Start training
     main(args)

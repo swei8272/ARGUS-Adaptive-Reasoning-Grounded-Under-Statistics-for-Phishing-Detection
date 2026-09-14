@@ -4,9 +4,13 @@
 import torch
 
 
+# Compatibility alias; training and inference share the runtime policy.
+from argus.utils.runtime import select_device as _select_device
+
+
 class Config:
     # ============ 设备配置 ============
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = _select_device()
 
     # ============ 特征配置 ============
     num_features = 100

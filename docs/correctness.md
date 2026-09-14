@@ -10,7 +10,7 @@ It does not establish improved ARGUS performance.
 | Fusion probabilities fed to `BCEWithLogitsLoss` | Fusion probabilities fed to `BCELoss`; boundary loss/gradients tested for finiteness |
 | Evaluation and relevance gating sigmoid the probability again | Both compare the probability directly with the unchanged `> 0.5` threshold |
 | Fusion softmax weights converted to Python floats in computation | Tensor weights remain differentiable; float conversion is only for reports/inference conflict overrides |
-| CPU float32 temporaries, including fallback and reshape | Temporary tensors follow the first floating input's device/dtype, or module parameters for all-scalar/empty input; reshape retains gradients |
+| CPU float32 temporaries, including fallback and reshape | Temporary tensors follow the first floating input's device/dtype, or module parameters for all-scalar/empty input; MPS uses float32 on the selected device; reshape retains gradients |
 | Trigger detection coupling unverified | Separate backward diagnostics expose no detection-loss connection; strict xfail documents it |
 | Missing labels default to phishing; URL substrings can set labels | Explicit `label:` / `class:` fields or standalone label tokens; missing labels rejected unless `--default-label 0/1` is explicitly selected and counted |
 | Single-class or empty evaluation reports misleading metrics | Label counts checked; evaluation raises before returning metrics or appending metric history |
@@ -142,3 +142,32 @@ and no-modality paths, gradient checks, multiprocess failure aggregation,
 metadata/evaluation safeguards, inference stubs and checkpoint structure. CUDA
 variants are collected and skipped when hardware is absent; a skip is not CUDA
 execution evidence. CI runs the same full `python -m pytest -q` command.
+
+## Apple Silicon deployment update
+
+The latest Issue #3 comment adds MPS as a first-class target. Current main's
+initial device selection (`961d5ac`) is integrated into the same Issue #3 PR.
+`argus.utils.runtime.select_device()` is the shared implementation; the old
+`config._select_device` name remains a compatibility alias. Priority is MPS,
+CUDA, CPU. Training seeding uses the CPU generator plus `torch.mps.manual_seed`
+or `torch.cuda.manual_seed_all` only for the selected backend, with Python and
+NumPy seeds retained. No CUDA API is used to seed MPS.
+
+The trainer moves its modules and all compute inputs to the selected device;
+MPS casts to float32 before transfer, including direct loss callers supplying
+CPU float64 arrays. Entry points explicitly use float32, inference constants
+follow the feature tensor, and MPS fusion/overall-confidence normalization uses
+the module's selected device. CPU floating precision remains supported. Pinned
+DataLoader memory is enabled only for CUDA. State-dict keys/shapes remain the
+same; choosing a different backend can produce normal floating-point/RNG
+variation, not bitwise equality or a model-performance improvement.
+
+`python -m argus.utils.device_smoke` reports real device availability and runs
+Linear plus ARGUS total-loss backward operations; it refuses an enabled silent
+MPS CPU fallback. It reports no accuracy/F1 or model risk output. Unsupported
+operators are allowed to fail explicitly, never hidden with automatic fallback.
+Real MPS tests cover fusion shapes/fallback, float32 transfer, optimizer step,
+inference, and separate detection/auxiliary/total gradient diagnostics. They
+confirm the same trigger disconnection on MPS; the objective is unchanged by
+this deployment refinement. CUDA hardware execution remains unverified on the
+Mac. Synthetic smoke success is not a complete production deployment audit.

@@ -28,6 +28,34 @@ point. Tests explicitly use CPU tensors and synthetic component inputs; they
 are not measured phishing-detection results. WHOIS is disabled in tests to keep
 them offline. Test dependencies are separate from runtime dependencies.
 
+### Apple Silicon Mac deployment
+
+Apple Silicon acceleration uses **PyTorch MPS/Metal, not CUDA**. Install the
+standard macOS PyTorch wheel through the package setup above; skip the Linux
+CPU-wheel command. Training and inference share `argus.utils.runtime` device
+selection: **MPS first, then CUDA on NVIDIA systems, otherwise CPU**. On the
+Mac this means MPS when available and CPU otherwise.
+
+The MPS path explicitly uses float32 for model parameters, features, prior
+scores, floating labels, constants and fusion buffers. CPU float64 inputs are
+converted before MPS dispatch. Do not call `.double()` on MPS tensors. Host data
+loading remains on CPU; pinned host memory is enabled only for CUDA loaders.
+
+```bash
+# Do not conceal unsupported Metal operators with CPU fallback.
+unset PYTORCH_ENABLE_MPS_FALLBACK
+python -m argus.utils.device_smoke
+python -m pytest -q tests/test_devices.py tests/test_gradients.py -s
+```
+
+The smoke command prints MPS build/availability, the selected and actual device,
+and real float32 tensor/model and ARGUS backward checks using synthetic inputs.
+Unsupported operators raise normally; ARGUS does not enable CPU fallback. The
+training seed helper seeds Python, NumPy, the CPU generator and only the selected
+accelerator's generator. Seeding is not a promise of bitwise reproducibility
+across backends. Device-selection mocks run on Linux CI; real MPS tests run only
+when MPS is available. No Mac test skip is evidence of real Metal execution.
+
 Optional capabilities:
 
 ```bash
