@@ -3,7 +3,7 @@
 """
 import torch
 from typing import Dict, List, Optional
-from ARGUS.core.constants import PRIOR_TRIGGER_RULES, FEATURE_INDEX_MAP
+from argus.core.constants import PRIOR_TRIGGER_RULES, FEATURE_INDEX_MAP
 
 
 class PriorTriggerRules:

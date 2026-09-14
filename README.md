@@ -3,6 +3,77 @@ We design ARUGUS that uses deterministic statistical and structural signals not 
 
 
 
+## Install and run the CPU baseline (Issue #2)
+
+Requires Python 3.10 or newer; CI uses Python 3.12. From a clean checkout:
+
+```bash
+git clone https://github.com/swei8272/ARGUS-Adaptive-Reasoning-Grounded-Under-Statistics-for-Phishing-Detection.git
+cd ARGUS-Adaptive-Reasoning-Grounded-Under-Statistics-for-Phishing-Detection
+python3 -m venv .venv
+source .venv/bin/activate
+# Linux: install the CPU wheel before installing the package.
+# macOS: skip this line; the default PyTorch wheel supports CPU.
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e .
+python -m pip install -e '.[test]'
+python -m pytest -q
+python -m argus.inference --help
+python -c "import argus.train; import argus.inference; print('Entry points import successfully')"
+```
+
+No manual `PYTHONPATH` changes, GPU, dataset, checkpoint or paid API are needed
+for these checks. The inference `--help` invocation only exercises the entry
+point. Tests explicitly use CPU tensors and synthetic component inputs; they
+are not measured phishing-detection results. WHOIS is disabled in tests to keep
+them offline. Test dependencies are separate from runtime dependencies.
+
+Optional capabilities:
+
+```bash
+python -m pip install -e '.[html]'   # BeautifulSoup HTML feature extraction
+python -m pip install -e '.[whois]'  # live WHOIS lookups (network-dependent)
+```
+
+The default install includes `tld` for URL parsing. Without HTML/WHOIS extras,
+the extractor prints its existing availability warnings and uses its existing
+fallbacks. Installing these extras can change which existing feature paths run
+and thus feature values; comparisons must use the same dependency environment.
+Dependency ranges provide a supported installation baseline, not a fully locked
+cross-platform numerical environment.
+
+### Package layout and migration
+
+The distribution is `argus-phishing`; all Python imports use lowercase `argus`.
+This conventional namespace replaces the previously unresolved `ARGUS`, `core`,
+and `training` imports. There are no duplicate root modules or compatibility
+shims. Use `python -m argus.train` and `python -m argus.inference` instead of the
+old root scripts. Public component classes are also exported from `argus`.
+
+| Old root files | New package paths |
+| --- | --- |
+| `feature_extractor.py`, `prior_trigger.py`, `learnable_trigger.py`, `confidence_estimator.py`, `multimodal_fusion.py`, `conflict_detector.py`, `conflict_resolver.py`, `prompt_generator.py`, `constants.py` | Same filenames under `argus/core/` |
+| `trainer.py`, `adversarial_aug.py`, `cost_tracker.py` | Same filenames under `argus/training/` |
+| `config.py` | `argus/utils/config.py` |
+| `train.py`, `inference.py` | Same filenames under `argus/` |
+| `test_argus.py` (manual print script) | Replaced by assertion-based `tests/test_smoke.py` |
+
+### Scientific limitations
+
+No algorithmic or numerical source behavior is changed by this packaging work:
+feature definitions, thresholds, losses, labels, dataset splits and metrics are
+preserved. Imports and module identities change, so external scripts using old
+paths must migrate; full-object pickles referencing old module paths are not
+compatibility-tested. Existing state-dict keys are unchanged.
+
+Visual/semantic evidence and the LLM integration still contain placeholders;
+without a checkpoint neural components have untrained initialization. Existing
+feature/data failure fallbacks and simplified conflict rules remain in place.
+Passing CPU smoke tests does not establish an end-to-end scientifically complete
+ARGUS system, validate training, or reproduce paper metrics. No experiment
+numbers are generated here. The prompt example below is illustrative, not a
+measured model output.
+
 ## Below is the example of the complete Prompts mentioned in ARGUS:
 
 

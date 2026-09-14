@@ -13,14 +13,14 @@ import random
 from typing import Optional, Tuple
 
 # Import core modules
-from ARGUS.utils.config import Config
-from core.feature_extractor import PhishingFeatureExtractor
-from core.prior_trigger import PriorTriggerRules
-from core.learnable_trigger import LearnableTrigger
-from core.confidence_estimator import ConfidenceEstimator
-from core.multimodal_fusion import OmniModalFusion
-from training.trainer import ARGUSTrainer
-from training.adversarial_aug import AdversarialAugmentation
+from argus.utils.config import Config
+from argus.core.feature_extractor import PhishingFeatureExtractor
+from argus.core.prior_trigger import PriorTriggerRules
+from argus.core.learnable_trigger import LearnableTrigger
+from argus.core.confidence_estimator import ConfidenceEstimator
+from argus.core.multimodal_fusion import OmniModalFusion
+from argus.training.trainer import ARGUSTrainer
+from argus.training.adversarial_aug import AdversarialAugmentation
 
 
 class PhishingSampleDataset(Dataset):

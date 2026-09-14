@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "argus-phishing"
+version = "0.1.0"
+description = "ARGUS phishing detection research baseline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26,<3",
+    "torch>=2.2,<3",
+    "IPy>=1.1,<2",
+    "Pillow>=10,<13",
+    "tqdm>=4.66,<5",
+    "tld>=0.13,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+html = ["beautifulsoup4>=4.12,<5"]
+whois = ["python-whois>=0.9,<1"]
+
+[tool.setuptools.packages.find]
+include = ["argus*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
