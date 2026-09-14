@@ -3,7 +3,7 @@
 """
 import torch
 from typing import Dict, List, Tuple  # ← 添加 Tuple
-from ARGUS.utils.config import Config
+from argus.utils.config import Config
 
 
 class ConflictResolver:

@@ -8,16 +8,16 @@ from typing import Dict, List, Optional
 from datetime import datetime
 
 # 导入核心模块
-from ARGUS.utils.config import Config
-from ARGUS import PhishingFeatureExtractor
-from ARGUS import PriorTriggerRules
-from ARGUS import LearnableTrigger
-from ARGUS import ConfidenceEstimator
-from ARGUS import OmniModalFusion
-from ARGUS import ConflictDetector
-from ARGUS import ConflictResolver
-from ARGUS import HierarchicalPromptGenerator
-from training.cost_tracker import CostTracker
+from argus.utils.config import Config
+from argus import PhishingFeatureExtractor
+from argus import PriorTriggerRules
+from argus import LearnableTrigger
+from argus import ConfidenceEstimator
+from argus import OmniModalFusion
+from argus import ConflictDetector
+from argus import ConflictResolver
+from argus import HierarchicalPromptGenerator
+from argus.training.cost_tracker import CostTracker
 
 
 class ARGUSDetector:
